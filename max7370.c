@@ -11,32 +11,50 @@
 #include <linux/gpio.h>
 #include <linux/interrupt.h>
 
+/*  dts
+	max7370: max7370@38{
+		 compatible = "mx,max7370";
+		 max7370_addr = <0x38>;
+		 max7370_irq_pin = <117>;
+		 max7370_bus_n = <1>;
+		 max7370_keycodemax = <0xff>;
+		 max7370_dbg_en = <0>;
+		 max7370_keycodes = <48 10 7 4 11 9 6 3 30 8 5 2 >;
+		 max7370_scancodes = <0 1 2 3 8 9 10 11 16 17 18 19>;		 
+    };
+*/
 
-static u16 INT_GPIO =    117;
-static u8 KB_I2C  =      1;
-static u8 KB_ADDR =      0x38;
+
+u16 INT_GPIO   =    117;
+u8 KB_I2C      =    1;
+u8 dbg         =    0;
+u8 KB_ADDR     =    0x38;
+u8 MAX_KEYCODE =    60;
+
+u8 kb_array[255];
 
 /*
  * MAX7370 registers
  */
-#define MAX7370_REG_KEYFIFO	         0x00
-#define MAX7370_REG_CONFIG	         0x01
+#define MAX7370_REG_KEYFIFO          0x00
+#define MAX7370_REG_CONFIG           0x01
 #define MAX7370_REG_DEBOUNCE         0x02
 #define MAX7370_REG_INTERRUPT        0x03
 #define MAX7370_REG_PORTS            0x04
-#define MAX7370_REG_KEYREP	         0x05
-#define MAX7370_REG_SLEEP	         0x06
+#define MAX7370_REG_KEYREP           0x05
+#define MAX7370_REG_SLEEP            0x06
 #define MAX7370_REG_ARR_SIZE         0x30
 
 
 /*
  * Configuration register bits
  */
-#define MAX7370_CFG_SLEEP       (1 << 7)
-#define MAX7370_CFG_INTERRUPT   (1 << 5)
-#define MAX7370_CFG_KEY_RELEASE (1 << 3)
-#define MAX7370_CFG_WAKEUP      (1 << 1)
-#define MAX7370_CFG_TIMEOUT     (1 << 0)
+#define MAX7370_CFG_SLEEP           (1 << 7)
+#define MAX7370_CFG_INTERRUPT       (1 << 5)
+#define MAX7370_CFG_KEY_RELEASE     (1 << 3)
+#define MAX7370_CFG_WAKEUP          (1 << 1)
+#define MAX7370_CFG_TIMEOUT         (1 << 0)
+#define MAX7370_CFG_KEY_NORELEASE   (0 << 3)
 
 /*
  * Autosleep register values (ms)
@@ -48,11 +66,6 @@ static u8 KB_ADDR =      0x38;
 #define MAX7370_AUTOSLEEP_512	        0x05
 #define MAX7370_AUTOSLEEP_256	        0x06
 #define MAX7370_AUTOSLEEP_DISABLE       0x00
-
-static unsigned int irqNumber;
-
-static int minor = 0;
-module_param( minor, int, S_IRUGO );
 
 static struct input_dev *input;
 struct i2c_client *max7370_client;
@@ -76,8 +89,9 @@ static int max7370_read_reg(struct i2c_client *client, int reg) {
 
 static void max7370_initialize(struct i2c_client *client) {
   
-    /* disable sleep, enable key release, clear int on first read */
-	max7370_write_reg(client, MAX7370_REG_CONFIG, MAX7370_CFG_KEY_RELEASE | MAX7370_CFG_INTERRUPT | MAX7370_CFG_WAKEUP); 
+        /* disable sleep, enable key release, clear int on first read */
+	max7370_write_reg(client, 
+	        MAX7370_REG_CONFIG, MAX7370_CFG_KEY_NORELEASE | MAX7370_CFG_INTERRUPT | MAX7370_CFG_WAKEUP); 
 	
 	/* debounce time 16ms */
 	max7370_write_reg(client, MAX7370_REG_DEBOUNCE, 0x77);
@@ -95,39 +109,24 @@ static void max7370_initialize(struct i2c_client *client) {
 static irqreturn_t kb_irq_handler(int irq, void *data) {
 	
 	unsigned int keycode;
-	unsigned char max7370_data = 0;
-	unsigned char code_valid;
-	
+	int max7370_data = 0;
+
 	while(max7370_data != 0x3f) {
 		max7370_data = max7370_read_reg(max7370_client, MAX7370_REG_KEYFIFO);
-		code_valid = 1;
-		switch(max7370_data)
-		{
-			case 0:  keycode = KEY_T; break;			
-			case 8:  keycode = KEY_0; break;			
-			case 4:  keycode = KEY_1; break;			
-			case 12: keycode = KEY_2; break;
-			case 17: keycode = KEY_3; break;
-			case 2:  keycode = KEY_4; break;
-			case 10: keycode = KEY_5; break;			
-			case 18: keycode = KEY_6; break;			
-			case 3:  keycode = KEY_7; break;			
-			case 11: keycode = KEY_8; break;
-			case 20: keycode = KEY_9; break;		
-			case 16: keycode = KEY_X; break;
-			
-			case 22: keycode = KEY_A; break;			
-			case 14: keycode = KEY_B; break;			
-			case 6:  keycode = KEY_C; break;
-			case 5:  keycode = KEY_D; break;		
-			case 13: keycode = KEY_E; break;
-			case 21: keycode = KEY_F; break;
-			
-			default: code_valid = 0;
+		if(max7370_data < 0) {
+			return IRQ_HANDLED;
 		}
-		if(code_valid) {
+		else {
+		   if((max7370_data != 0x3f) && (dbg == 1)) {
+		      printk (KERN_INFO "max7370 scancode = %d\n", max7370_data);
+           }
+	    }
+		if(kb_array[max7370_data] != 0xff) {
+			keycode = kb_array[max7370_data];
+			if(dbg == 1) {
+			    printk (KERN_INFO "linux keycode = %d\n", keycode);
+			}
 			input_report_key(input, keycode, 1);	
-			input_report_key(input, keycode, 0);
 			input_sync(input);
 		}
 	}
@@ -137,30 +136,64 @@ static irqreturn_t kb_irq_handler(int irq, void *data) {
 
 static int read_dts_pins(void) {
 	u32 dts_data;
+	u32 dts_data2;
+	u8 i;
 
 	node = of_find_node_by_name(NULL, "max7370"); 
 	
 	if (node != NULL) {
-	    if (!of_property_read_u32(node, "max_addr", &dts_data)) {	      
+	    if (!of_property_read_u32(node, "max7370_addr", &dts_data)) {	      
 	      KB_ADDR = dts_data;
 	    }
 	    else {
 	      printk (KERN_INFO "reg not found, use default value: %d\n", KB_ADDR);
 	    }
-	    if (!of_property_read_u32(node, "max_bus_n", &dts_data)) {	      
-	      KB_I2C = dts_data;
-	      
+	    
+	    if (!of_property_read_u32(node, "max7370_bus_n", &dts_data)) {	      
+	      KB_I2C = dts_data;	       
 	    }
-	     else {
+	    else {
 	      printk (KERN_INFO "bus number not found, use default value: %d\n", KB_I2C);
 	    }
 	    
-	    if (!of_property_read_u32(node, "max_irq_pin", &dts_data)) {
+	    if (!of_property_read_u32(node, "max7370_irq_pin", &dts_data)) {
 	      INT_GPIO = dts_data;	      
 	    }
-	     else {
+	    else {
 	      printk (KERN_INFO "irq_pin not found, use default value: %d\n", INT_GPIO);
 	    }
+	    
+	    if (!of_property_read_u32(node, "max7370_keycodemax", &dts_data)) {
+	      MAX_KEYCODE = dts_data;	      
+	    }
+	    else {
+	      printk (KERN_INFO "max_keycodemax not found, use default value: %d\n", MAX_KEYCODE);
+	    }
+	    
+	    if (!of_property_read_u32(node, "max7370_dbg_en", &dts_data)) {
+	      dbg = dts_data; 
+	      dbg = 1;    
+	    }
+	    else {
+	      printk (KERN_INFO "debug is not enabled: %d\n", MAX_KEYCODE);
+	    }
+	    
+	    memset(kb_array, 0xff, sizeof(kb_array));
+	    
+	    for(i = 0; i < 254; i++) {
+			if(!of_property_read_u32_index(node, "max7370_keycodes", i, &dts_data)) {
+				if(!of_property_read_u32_index(node, "max7370_scancodes", i, &dts_data2)) {
+					kb_array[dts_data2] = dts_data;
+				}
+				else {
+					break;
+					
+				}
+			}
+			else {
+				break;
+			}
+		}
 	} else {
 		return 1;
 	}
@@ -173,33 +206,36 @@ static int __init test_init( void )
 {
 	int ret = 0;
 	int result;
-	struct i2c_adapter * my_adap;
-	
+	int i;
+	unsigned int irqNumber;
+	struct i2c_adapter *max_i2c_adap;
 	
  	if(read_dts_pins() != 0) {
 		printk(KERN_INFO "max7370: no dts params\n");
  		return -ENODEV;
  	}
-	
-	my_adap = i2c_get_adapter(KB_I2C);
-	
-	printk( KERN_ALERT "max7370 starting...\n" );
-		
-	max7370_client = kmalloc(sizeof(*max7370_client), GFP_KERNEL);
+    //get adapter address
+	max_i2c_adap = i2c_get_adapter(KB_I2C);
+	if (max_i2c_adap <= 0) {
+		printk(KERN_INFO "failed to find I2C bus\n");
+		return -ENODEV;
+    }
 
+    //allocate memory
+	max7370_client = kmalloc(sizeof(*max7370_client), GFP_KERNEL); 
 	if (!max7370_client) {
 		dev_err(&max7370_client->dev, "failed to allocate memory\n");
 		return -ENOMEM;
 	}
-       
-	max7370_client = i2c_new_dummy (my_adap, KB_ADDR);
-
-	if (ret < 0) {
+	
+    //set client address and bus_n   
+	max7370_client = i2c_new_dummy (max_i2c_adap, KB_ADDR);
+	
+	//probe device 
+	ret = max7370_read_reg(max7370_client, MAX7370_REG_KEYFIFO);
+	if(ret < 0) {
 		dev_err(&max7370_client->dev, "failed to detect device\n");
 		return -ENODEV;
-	}
-	while(ret != 0x3f) {
-		ret = max7370_read_reg(max7370_client, MAX7370_REG_KEYFIFO);
 	}
 
 	gpio_request(INT_GPIO, "sysfs");
@@ -212,11 +248,11 @@ static int __init test_init( void )
 	max7370_client->irq = irqNumber;
 	result = devm_request_threaded_irq(&max7370_client->dev, 
 			max7370_client->irq, 
-			NULL,                            // The interrupt number requested 
-			kb_irq_handler,                  // The pointer to the handler function (above)
-			IRQF_TRIGGER_LOW | IRQF_ONESHOT, 
-			"kb_irq_handler",                // Used in /proc/interrupts to identify the owner
-			NULL);                           // The *dev_id for shared interrupt lines, NULL here
+			NULL, // The interrupt number requested 
+			kb_irq_handler, // The pointer to the handler function (above)
+			IRQF_TRIGGER_LOW | IRQF_ONESHOT, // Interrupt is on rising edge (button press in Fig.1)
+			"kb_irq_handler", // Used in /proc/interrupts to identify the owner
+			NULL); // The *dev_id for shared interrupt lines, NULL here
 	
 	if(result) {
 		printk(KERN_INFO "short: can't get assigned irq");
@@ -225,7 +261,9 @@ static int __init test_init( void )
 	max7370_initialize(max7370_client);
 	   
 	input = input_allocate_device();
-
+	input->name = "matrix_kb";
+	input->phys = "/max7370-kb/input0";
+	
 	input->id.bustype = BUS_HOST;
 	input->id.vendor = 0x0001;
 	input->id.product = 0x0001;
@@ -233,25 +271,9 @@ static int __init test_init( void )
 	
 	set_bit(EV_KEY, input->evbit);
 
-	set_bit(KEY_0, input->keybit);
-	set_bit(KEY_1, input->keybit);
-	set_bit(KEY_2, input->keybit);
-	set_bit(KEY_3, input->keybit);
-	set_bit(KEY_4, input->keybit);
-	set_bit(KEY_5, input->keybit);
-	set_bit(KEY_6, input->keybit);
-	set_bit(KEY_7, input->keybit);
-	set_bit(KEY_8, input->keybit);
-	set_bit(KEY_9, input->keybit);
-	set_bit(KEY_T, input->keybit);
-	set_bit(KEY_X, input->keybit);
-	set_bit(KEY_A, input->keybit);
-	set_bit(KEY_B, input->keybit);
-	set_bit(KEY_C, input->keybit);
-	set_bit(KEY_D, input->keybit);
-	set_bit(KEY_E, input->keybit);
-	set_bit(KEY_F, input->keybit);
-	
+    for(i = 0; i < MAX_KEYCODE; i++) { 
+		__set_bit(i, input->keybit);
+	}	
 	result = input_register_device(input);
 	
 	return 0;
@@ -266,16 +288,15 @@ static void __exit test_exit( void )
 	input_unregister_device(input);
 	input_free_device(input);
 	
-	gpio_unexport(INT_GPIO);
-	gpio_free(INT_GPIO); 
+	gpio_unexport(INT_GPIO); // Unexport the Button GPIO
+	gpio_free(INT_GPIO); // Free the LED GPIO
 }
 
 
 module_init( test_init);
 module_exit( test_exit);
 
-MODULE_SUPPORTED_DEVICE( "test" );
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("GPL v2");
 MODULE_VERSION("0.1");
-MODULE_DESCRIPTION("driver");
+MODULE_DESCRIPTION("matrix kb driver");
 
